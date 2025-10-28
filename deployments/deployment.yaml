@@ -1,0 +1,209 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rancher-fip-manager-webhook
+  namespace: rancher-fip-manager
+  labels:
+    app: rancher-fip-manager-webhook
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: rancher-fip-manager-webhook
+  labels:
+    app: rancher-fip-manager-webhook
+rules:
+- apiGroups:
+  - certificates.k8s.io
+  resources:
+  - certificatesigningrequests
+  verbs:
+  - create
+  - get
+  - delete
+- apiGroups:
+  - certificates.k8s.io
+  resources:
+  - certificatesigningrequests/approval
+  verbs:
+  - update
+- apiGroups:
+  - certificates.k8s.io
+  resources:
+  - signers
+  resourceNames:
+  - kubernetes.io/kubelet-serving
+  verbs:
+  - approve
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingwebhookconfigurations
+  verbs:
+  - create
+- apiGroups:
+  - admissionregistration.k8s.io
+  resources:
+  - validatingwebhookconfigurations
+  resourceNames:
+  - rancher-fip-manager-validator
+  verbs:
+  - get
+  - delete
+  - update
+- apiGroups:
+  - rancher.k8s.binbash.org
+  resources:
+  - floatingips
+  - floatingippools
+  - floatingipprojectquotas
+  verbs:
+  - get
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: rancher-fip-manager-webhook
+  labels:
+    app: rancher-fip-manager-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rancher-fip-manager-webhook
+subjects:
+- kind: ServiceAccount
+  name: rancher-fip-manager-webhook
+  namespace: rancher-fip-manager
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rancher-fip-manager-webhook
+  namespace: rancher-fip-manager
+  labels:
+    app: rancher-fip-manager-webhook
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+  - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rancher-fip-manager-webhook
+  namespace: rancher-fip-manager
+  labels:
+    app: rancher-fip-manager-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rancher-fip-manager-webhook
+subjects:
+- kind: ServiceAccount
+  name: rancher-fip-manager-webhook
+  namespace: rancher-fip-manager
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rancher-fip-manager-webhook-cabundle
+  namespace: kube-system
+  labels:
+    app: rancher-fip-manager-webhook
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  resourceNames:
+  - kube-root-ca.crt
+  verbs:
+  - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rancher-fip-manager-webhook-cabundle
+  namespace: kube-system
+  labels:
+    app: rancher-fip-manager-webhook
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: rancher-fip-manager-webhook-cabundle
+subjects:
+- kind: ServiceAccount
+  name: rancher-fip-manager-webhook
+  namespace: rancher-fip-manager
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: rancher-fip-manager-webhook
+  name: rancher-fip-manager-webhook
+  namespace: rancher-fip-manager
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: rancher-fip-manager-webhook
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: rancher-fip-manager-webhook
+    spec:
+      containers:
+      - name: rancher-fip-manager-webhook
+        image: ghcr.io/joeyloman/rancher-fip-manager-webhook:dev
+        env:
+          - name: LOGLEVEL
+            value: INFO
+        imagePullPolicy: Always
+        resources:
+          requests:
+            cpu: 100m
+            memory: 8Mi
+          limits:
+            cpu: 500m
+            memory: 32Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        securityContext: {}
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      serviceAccountName: rancher-fip-manager-webhook
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: rancher-fip-manager-webhook
+  name: rancher-fip-manager-webhook
+  namespace: rancher-fip-manager
+spec:
+  selector:
+    app: rancher-fip-manager-webhook
+  ports:
+    - name: webhook
+      port: 8443
+      protocol: TCP
+      targetPort: 8443
+  sessionAffinity: None
+  type: ClusterIP
+   

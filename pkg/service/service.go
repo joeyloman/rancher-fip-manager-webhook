@@ -1,0 +1,278 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"time"
+
+	rfmv1 "github.com/joeyloman/rancher-fip-manager/pkg/apis/rancher.k8s.binbash.org/v1beta1"
+	log "github.com/sirupsen/logrus"
+	admissionv1 "k8s.io/api/admission/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+)
+
+type Handler struct {
+	ctx        context.Context
+	httpServer *http.Server
+	clientset  kubernetes.Interface
+	dynamic    dynamic.Interface
+}
+
+func Register(ctx context.Context) *Handler {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatalf("Failed to get in-cluster config: %v", err)
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Failed to create clientset: %v", err)
+	}
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Failed to create dynamic client: %v", err)
+	}
+	return &Handler{
+		ctx:       ctx,
+		clientset: clientset,
+		dynamic:   dynamicClient,
+	}
+}
+
+func validateFloatingIP(ctx context.Context, dynamic dynamic.Interface, ar *admissionv1.AdmissionReview, fip *rfmv1.FloatingIP, h *Handler) *admissionv1.AdmissionResponse {
+	// 1. Check if the specified FloatingIPPool exists.
+	fipGVR := schema.GroupVersionResource{
+		Group:    "rancher.k8s.binbash.org",
+		Version:  "v1beta1",
+		Resource: "floatingippools",
+	}
+
+	unstructuredFIPPool, err := dynamic.Resource(fipGVR).Get(ctx, fip.Spec.FloatingIPPool, metav1.GetOptions{})
+	if err != nil {
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: fmt.Sprintf("the specified floatingippool %s does not exist", fip.Spec.FloatingIPPool),
+			},
+		}
+	}
+
+	var fipPool rfmv1.FloatingIPPool
+	err = runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredFIPPool.Object, &fipPool)
+	if err != nil {
+		log.Errorf("failed to convert unstructured FloatingIPPool to typed: %s", err)
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: "internal server error: failed to process floatingippool",
+			},
+		}
+	}
+
+	// 2. IP Availability
+	if fip.Spec.IPAddr != nil {
+		requestedIP := net.ParseIP(*fip.Spec.IPAddr)
+		if requestedIP == nil {
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("invalid IP address format: %s", *fip.Spec.IPAddr),
+				},
+			}
+		}
+
+		// Check if the IP is within the subnet
+		_, subnet, err := net.ParseCIDR(fipPool.Spec.IPConfig.Subnet)
+		if err != nil {
+			log.Errorf("failed to parse subnet %s: %s", fipPool.Spec.IPConfig.Subnet, err)
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: "internal server error: invalid subnet configuration in floatingippool",
+				},
+			}
+		}
+		if !subnet.Contains(requestedIP) {
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("requested IP %s is not in the subnet range %s", *fip.Spec.IPAddr, fipPool.Spec.IPConfig.Subnet),
+				},
+			}
+		}
+
+		// Check if the IP is in the exclude list
+		for _, excludedIP := range fipPool.Spec.IPConfig.Pool.Exclude {
+			if *fip.Spec.IPAddr == excludedIP {
+				return &admissionv1.AdmissionResponse{
+					UID:     ar.Request.UID,
+					Allowed: false,
+					Result: &metav1.Status{
+						Message: fmt.Sprintf("requested IP %s is in the exclude list", *fip.Spec.IPAddr),
+					},
+				}
+			}
+		}
+
+		// Check if the IP is already allocated
+		if _, ok := fipPool.Status.Allocated[*fip.Spec.IPAddr]; ok {
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("requested IP %s is already allocated", *fip.Spec.IPAddr),
+				},
+			}
+		}
+	} else {
+		// if no ip is requested, check if there are available ips in the pool
+		if fipPool.Status.Available <= 0 {
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("no available IPs in floatingippool %s", fip.Spec.FloatingIPPool),
+				},
+			}
+		}
+	}
+
+	// 3. Project Quota Enforcement
+	// This sleep prevents Quota usage race conditions when creating multiple FloatingIPs in a short period of time
+	time.Sleep(2 * time.Second)
+
+	projectID := fip.ObjectMeta.Labels["rancher.k8s.binbash.org/project-name"]
+
+	plbcGVR := schema.GroupVersionResource{
+		Group:    "rancher.k8s.binbash.org",
+		Version:  "v1beta1",
+		Resource: "floatingipprojectquotas",
+	}
+
+	unstructuredPLBC, err := dynamic.Resource(plbcGVR).Get(ctx, projectID, metav1.GetOptions{})
+	if err != nil {
+		log.Errorf("failed to get floatingipprojectquota for project %s: %s", projectID, err)
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: fmt.Sprintf("failed to get floatingipprojectquota for project %s", projectID),
+			},
+		}
+	}
+
+	var plbc rfmv1.FloatingIPProjectQuota
+	err = runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPLBC.Object, &plbc)
+	if err != nil {
+		log.Errorf("failed to convert unstructured FloatingIPProjectQuota to typed: %s", err)
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: "internal server error: failed to process floatingipprojectquota",
+			},
+		}
+	}
+
+	// Check the quota for the specified FloatingIPPool
+	quota, ok := plbc.Spec.FloatingIPQuota[fip.Spec.FloatingIPPool]
+	if !ok {
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: fmt.Sprintf("no quota defined for floatingippool %s in project %s", fip.Spec.FloatingIPPool, projectID),
+			},
+		}
+	}
+
+	// Check the current usage for that pool
+	usage := 0
+	if fipInfo, ok := plbc.Status.FloatingIPs[fip.Spec.FloatingIPPool]; ok {
+		usage = fipInfo.Used
+	}
+
+	// log.Infof("(validateFloatingIP) DEBUG usage: %d, quota: %d", usage, quota)
+
+	if usage >= quota {
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: fmt.Sprintf("quota exceeded for floatingippool %s in project %s. Quota: %d, Used: %d", fip.Spec.FloatingIPPool, projectID, quota, usage),
+			},
+		}
+	}
+
+	return &admissionv1.AdmissionResponse{
+		UID:     ar.Request.UID,
+		Allowed: true,
+	}
+}
+
+func (h *Handler) validateFloatingIPAdmission(w http.ResponseWriter, r *http.Request) {
+	ar := &admissionv1.AdmissionReview{}
+	if err := json.NewDecoder(r.Body).Decode(&ar); err != nil {
+		log.Errorf("cannot decode AdmissionReview to json: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "cannot decode AdmissionReview to json: %s", err)
+		return
+	}
+
+	fip := &rfmv1.FloatingIP{}
+	if err := json.Unmarshal(ar.Request.Object.Raw, &fip); err != nil {
+		log.Errorf("cannot unmarshal json to FloatingIP: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "cannot unmarshal json to FloatingIP: %s", err)
+		return
+	}
+
+	ar.Response = validateFloatingIP(r.Context(), h.dynamic, ar, fip, h)
+	if !ar.Response.Allowed {
+		log.Warnf("(validateFloatingIPAdmission) request not allowed: %s", ar.Response.Result.Message)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(&ar)
+}
+
+func (h *Handler) Run() {
+	homedir := os.Getenv("HOME")
+	keyPath := fmt.Sprintf("%s/tls.key", homedir)
+	certPath := fmt.Sprintf("%s/tls.crt", homedir)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, req *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("/validate-floatingip", h.validateFloatingIPAdmission)
+
+	h.httpServer = &http.Server{
+		Addr:           ":8443",
+		Handler:        mux,
+		ReadTimeout:    10 * time.Second,
+		WriteTimeout:   10 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1048576
+	}
+
+	if err := h.httpServer.ListenAndServeTLS(certPath, keyPath); err != nil {
+		if err != http.ErrServerClosed {
+			log.Errorf("HTTP server error: %v", err)
+		}
+	}
+}
+
+func (h *Handler) Stop() error {
+	return h.httpServer.Shutdown(h.ctx)
+}
