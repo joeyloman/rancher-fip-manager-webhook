@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -111,6 +112,57 @@ func validateFloatingIP(ctx context.Context, dynamic dynamic.Interface, ar *admi
 				Result: &metav1.Status{
 					Message: fmt.Sprintf("requested IP %s is not in the subnet range %s", *fip.Spec.IPAddr, fipPool.Spec.IPConfig.Subnet),
 				},
+			}
+		}
+
+		// Check if the IP is within the fipPool.Spec.IPConfig.Pool.Start and fipPool.Spec.IPConfig.Pool.End range
+		startIP := net.ParseIP(fipPool.Spec.IPConfig.Pool.Start)
+		if startIP == nil {
+			log.Errorf("failed to parse start IP %s from floatingippool %s", fipPool.Spec.IPConfig.Pool.Start, fip.Spec.FloatingIPPool)
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("internal server error: invalid start ip configuration in floatingippool %s", fip.Spec.FloatingIPPool),
+				},
+			}
+		}
+
+		endIP := net.ParseIP(fipPool.Spec.IPConfig.Pool.End)
+		if endIP == nil {
+			log.Errorf("failed to parse end IP %s from floatingippool %s", fipPool.Spec.IPConfig.Pool.End, fip.Spec.FloatingIPPool)
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("internal server error: invalid end ip configuration in floatingippool %s", fip.Spec.FloatingIPPool),
+				},
+			}
+		}
+
+		if reqIP4, startIP4, endIP4 := requestedIP.To4(), startIP.To4(), endIP.To4(); reqIP4 != nil && startIP4 != nil && endIP4 != nil {
+			// All are IPv4, compare them.
+			if bytes.Compare(reqIP4, startIP4) < 0 || bytes.Compare(reqIP4, endIP4) > 0 {
+				return &admissionv1.AdmissionResponse{
+					UID:     ar.Request.UID,
+					Allowed: false,
+					Result: &metav1.Status{
+						Message: fmt.Sprintf("requested IP %s is not in the pool range [%s, %s]",
+							*fip.Spec.IPAddr, fipPool.Spec.IPConfig.Pool.Start, fipPool.Spec.IPConfig.Pool.End),
+					},
+				}
+			}
+		} else {
+			// Compare as-is, assuming IPv6 or consistent representation from ParseIP
+			if bytes.Compare(requestedIP, startIP) < 0 || bytes.Compare(requestedIP, endIP) > 0 {
+				return &admissionv1.AdmissionResponse{
+					UID:     ar.Request.UID,
+					Allowed: false,
+					Result: &metav1.Status{
+						Message: fmt.Sprintf("requested IP %s is not in the pool range [%s, %s]",
+							*fip.Spec.IPAddr, fipPool.Spec.IPConfig.Pool.Start, fipPool.Spec.IPConfig.Pool.End),
+					},
+				}
 			}
 		}
 
