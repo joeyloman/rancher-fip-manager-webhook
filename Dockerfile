@@ -1,4 +1,4 @@
-FROM docker.io/golang:1.25-alpine3.22 AS builder
+FROM docker.io/golang:1.25-alpine3.23 AS builder
 RUN mkdir /src /deps
 RUN apk update && apk add git build-base binutils-gold
 WORKDIR /deps
@@ -7,7 +7,7 @@ RUN go mod download
 ADD / /src
 WORKDIR /src
 RUN go build -a -o rancher-fip-manager-webhook cmd/webhook/main.go
-FROM docker.io/alpine:3.22
+FROM docker.io/alpine:3.23
 RUN adduser -S -D -h /app rancher-fip-manager-webhook
 USER rancher-fip-manager-webhook
 COPY --from=builder /src/rancher-fip-manager-webhook /app/
