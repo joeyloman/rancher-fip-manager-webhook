@@ -275,6 +275,139 @@ func validateFloatingIP(ctx context.Context, dynamic dynamic.Interface, ar *admi
 	}
 }
 
+func validateFloatingIPPool(ctx context.Context, ar *admissionv1.AdmissionReview, fipPool *rfmv1.FloatingIPPool) *admissionv1.AdmissionResponse {
+	// Check if the subnet is valid
+	_, subnet, err := net.ParseCIDR(fipPool.Spec.IPConfig.Subnet)
+	if err != nil {
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: fmt.Sprintf("invalid subnet format: %s", fipPool.Spec.IPConfig.Subnet),
+			},
+		}
+	}
+
+	// Check if the start address is valid and within the subnet
+	startIP := net.ParseIP(fipPool.Spec.IPConfig.Pool.Start)
+	if startIP == nil {
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: fmt.Sprintf("invalid start IP address format: %s", fipPool.Spec.IPConfig.Pool.Start),
+			},
+		}
+	}
+	if !subnet.Contains(startIP) {
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: fmt.Sprintf("start IP address %s is not within the subnet %s", fipPool.Spec.IPConfig.Pool.Start, fipPool.Spec.IPConfig.Subnet),
+			},
+		}
+	}
+
+	// Check if the end address is valid and within the subnet
+	endIP := net.ParseIP(fipPool.Spec.IPConfig.Pool.End)
+	if endIP == nil {
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: fmt.Sprintf("invalid end IP address format: %s", fipPool.Spec.IPConfig.Pool.End),
+			},
+		}
+	}
+	if !subnet.Contains(endIP) {
+		return &admissionv1.AdmissionResponse{
+			UID:     ar.Request.UID,
+			Allowed: false,
+			Result: &metav1.Status{
+				Message: fmt.Sprintf("end IP address %s is not within the subnet %s", fipPool.Spec.IPConfig.Pool.End, fipPool.Spec.IPConfig.Subnet),
+			},
+		}
+	}
+
+	// Check that start <= end
+	if startIP4, endIP4 := startIP.To4(), endIP.To4(); startIP4 != nil && endIP4 != nil {
+		// Both are IPv4, compare them
+		if bytes.Compare(startIP4, endIP4) > 0 {
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("start IP address %s must be less than or equal to end IP address %s", fipPool.Spec.IPConfig.Pool.Start, fipPool.Spec.IPConfig.Pool.End),
+				},
+			}
+		}
+	} else {
+		// Compare as-is, assuming IPv6 or consistent representation from ParseIP
+		if bytes.Compare(startIP, endIP) > 0 {
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("start IP address %s must be less than or equal to end IP address %s", fipPool.Spec.IPConfig.Pool.Start, fipPool.Spec.IPConfig.Pool.End),
+				},
+			}
+		}
+	}
+
+	// Check if exclude IPs are valid, within the subnet and between the start and end IP
+	for _, excludedIPStr := range fipPool.Spec.IPConfig.Pool.Exclude {
+		excludedIP := net.ParseIP(excludedIPStr)
+		if excludedIP == nil {
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("invalid excluded IP address format: %s", excludedIPStr),
+				},
+			}
+		}
+		if !subnet.Contains(excludedIP) {
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("excluded IP address %s is not within the subnet %s", excludedIPStr, fipPool.Spec.IPConfig.Subnet),
+				},
+			}
+		}
+		// Check if excluded IP is outside the pool range [startIP, endIP]
+		if startIP4, endIP4, excludedIP4 := startIP.To4(), endIP.To4(), excludedIP.To4(); startIP4 != nil && endIP4 != nil && excludedIP4 != nil {
+			// All are IPv4, compare them
+			if bytes.Compare(excludedIP4, startIP4) < 0 || bytes.Compare(excludedIP4, endIP4) > 0 {
+				return &admissionv1.AdmissionResponse{
+					UID:     ar.Request.UID,
+					Allowed: false,
+					Result: &metav1.Status{
+						Message: fmt.Sprintf("excluded IP address %s is not within the pool range [%s, %s]", excludedIPStr, fipPool.Spec.IPConfig.Pool.Start, fipPool.Spec.IPConfig.Pool.End),
+					},
+				}
+			}
+		} else {
+			// Compare as-is, assuming IPv6 or consistent representation from ParseIP
+			if bytes.Compare(excludedIP, startIP) < 0 || bytes.Compare(excludedIP, endIP) > 0 {
+				return &admissionv1.AdmissionResponse{
+					UID:     ar.Request.UID,
+					Allowed: false,
+					Result: &metav1.Status{
+						Message: fmt.Sprintf("excluded IP address %s is not within the pool range [%s, %s]", excludedIPStr, fipPool.Spec.IPConfig.Pool.Start, fipPool.Spec.IPConfig.Pool.End),
+					},
+				}
+			}
+		}
+	}
+
+	return &admissionv1.AdmissionResponse{
+		UID:     ar.Request.UID,
+		Allowed: true,
+	}
+}
+
 func (h *Handler) validateFloatingIPAdmission(w http.ResponseWriter, r *http.Request) {
 	ar := &admissionv1.AdmissionReview{}
 	if err := json.NewDecoder(r.Body).Decode(&ar); err != nil {
@@ -301,6 +434,32 @@ func (h *Handler) validateFloatingIPAdmission(w http.ResponseWriter, r *http.Req
 	json.NewEncoder(w).Encode(&ar)
 }
 
+func (h *Handler) validateFloatingIPPoolAdmission(w http.ResponseWriter, r *http.Request) {
+	ar := &admissionv1.AdmissionReview{}
+	if err := json.NewDecoder(r.Body).Decode(&ar); err != nil {
+		log.Errorf("cannot decode AdmissionReview to json: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "cannot decode AdmissionReview to json: %s", err)
+		return
+	}
+
+	fipPool := &rfmv1.FloatingIPPool{}
+	if err := json.Unmarshal(ar.Request.Object.Raw, &fipPool); err != nil {
+		log.Errorf("cannot unmarshal json to FloatingIPPool: %s", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "cannot unmarshal json to FloatingIPPool: %s", err)
+		return
+	}
+
+	ar.Response = validateFloatingIPPool(r.Context(), ar, fipPool)
+	if !ar.Response.Allowed {
+		log.Warnf("(validateFloatingIPPoolAdmission) request not allowed: %s", ar.Response.Result.Message)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(&ar)
+}
+
 func (h *Handler) Run() {
 	homedir := os.Getenv("HOME")
 	keyPath := fmt.Sprintf("%s/tls.key", homedir)
@@ -309,6 +468,7 @@ func (h *Handler) Run() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, req *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("/validate-floatingip", h.validateFloatingIPAdmission)
+	mux.HandleFunc("/validate-floatingippool", h.validateFloatingIPPoolAdmission)
 
 	h.httpServer = &http.Server{
 		Addr:           ":8443",

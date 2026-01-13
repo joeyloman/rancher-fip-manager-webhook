@@ -61,7 +61,7 @@ func (h *Handler) getRancherFloatingIPWebhook() (webhook admregv1.ValidatingWebh
 		return
 	}
 
-	webhook.Name = fmt.Sprintf("%s.%s.svc", h.webhookName, h.webhookNamespace)
+	webhook.Name = fmt.Sprintf("floatingip-%s.%s.svc", h.webhookName, h.webhookNamespace)
 
 	matchLabels := make(map[string]string)
 	matchLabels["admission-webhook"] = "enabled"
@@ -100,6 +100,51 @@ func (h *Handler) getRancherFloatingIPWebhook() (webhook admregv1.ValidatingWebh
 	return
 }
 
+func (h *Handler) getRancherFloatingIPPoolWebhook() (webhook admregv1.ValidatingWebhook, err error) {
+	cert, err := h.getCaBundleFromCABundleConfigMap()
+	if err != nil {
+		return
+	}
+
+	webhook.Name = fmt.Sprintf("floatingippool-%s.%s.svc", h.webhookName, h.webhookNamespace)
+
+	matchLabels := make(map[string]string)
+	matchLabels["admission-webhook"] = "enabled"
+	nameSpaceSelector := metav1.LabelSelector{}
+	webhook.NamespaceSelector = &nameSpaceSelector
+
+	var rules []admregv1.RuleWithOperations
+
+	rule := admregv1.RuleWithOperations{}
+	rule.APIGroups = []string{"rancher.k8s.binbash.org"}
+	rule.APIVersions = []string{"v1beta1"}
+	rule.Operations = []admregv1.OperationType{"CREATE", "UPDATE"}
+	rule.Resources = []string{"floatingippools"}
+	scope := admregv1.ClusterScope
+	rule.Scope = &scope
+	rules = append(rules, rule)
+	webhook.Rules = rules
+
+	sideeffects := admregv1.SideEffectClassNone
+	webhook.SideEffects = &sideeffects
+
+	clientconfig := admregv1.WebhookClientConfig{}
+	serviceref := admregv1.ServiceReference{}
+	serviceref.Namespace = h.webhookNamespace
+	serviceref.Name = h.webhookName
+	path := "/validate-floatingippool"
+	serviceref.Path = &path
+	port := int32(8443)
+	serviceref.Port = &port
+	clientconfig.Service = &serviceref
+	clientconfig.CABundle = []byte(cert)
+	webhook.ClientConfig = clientconfig
+
+	webhook.AdmissionReviewVersions = []string{"v1"}
+
+	return
+}
+
 func (h *Handler) AddValidatingWebhookConfiguration() (err error) {
 	if h.checkValidatingWebhookConfiguration() {
 		return
@@ -113,6 +158,12 @@ func (h *Handler) AddValidatingWebhookConfiguration() (err error) {
 		return
 	}
 	vwc.Webhooks = append(vwc.Webhooks, rancherFloatingIPWebhook)
+
+	rancherFloatingIPPoolWebhook, err := h.getRancherFloatingIPPoolWebhook()
+	if err != nil {
+		return
+	}
+	vwc.Webhooks = append(vwc.Webhooks, rancherFloatingIPPoolWebhook)
 
 	_, err = h.clientset.AdmissionregistrationV1().ValidatingWebhookConfigurations().Create(context.TODO(), &vwc, metav1.CreateOptions{})
 

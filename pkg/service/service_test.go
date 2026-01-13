@@ -27,6 +27,8 @@ func TestValidateFloatingIP(t *testing.T) {
 			IPConfig: &rfmv1.IPConfig{
 				Subnet: "192.168.1.0/24",
 				Pool: rfmv1.Pool{
+					Start:   "192.168.1.10",
+					End:     "192.168.1.200",
 					Exclude: []string{"192.168.1.101"},
 				},
 			},
@@ -223,8 +225,8 @@ func TestValidateFloatingIP(t *testing.T) {
 					UID: "test-uid",
 				},
 			}
-			unstructuredPools, _ := LomanJoeyUnstructuredList(tc.existingPools)
-			unstructuredPLBCs, _ := LomanJoeyUnstructuredList(tc.existingPLBCs)
+			unstructuredPools, _ := getUnstructuredList(tc.existingPools)
+			unstructuredPLBCs, _ := getUnstructuredList(tc.existingPLBCs)
 
 			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme(), append(unstructuredPools, unstructuredPLBCs...)...)
 
@@ -238,7 +240,299 @@ func TestValidateFloatingIP(t *testing.T) {
 	}
 }
 
-func LomanJoeyUnstructuredList(objects []runtime.Object) ([]runtime.Object, error) {
+func TestValidateFloatingIPPool(t *testing.T) {
+	validFipPool := &rfmv1.FloatingIPPool{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "rancher.k8s.binbash.org/v1beta1",
+			Kind:       "FloatingIPPool",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-pool",
+		},
+		Spec: rfmv1.FloatingIPPoolSpec{
+			IPConfig: &rfmv1.IPConfig{
+				Subnet: "192.168.1.0/24",
+				Pool: rfmv1.Pool{
+					Start:   "192.168.1.10",
+					End:     "192.168.1.20",
+					Exclude: []string{"192.168.1.15"},
+				},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name            string
+		fipPool         *rfmv1.FloatingIPPool
+		expectedAllowed bool
+		expectedMessage string
+	}{
+		{
+			name: "invalid subnet format",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "invalid-subnet",
+						Pool:   validFipPool.Spec.IPConfig.Pool,
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "invalid subnet format: invalid-subnet",
+		},
+		{
+			name: "invalid start IP address format",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   "invalid-ip",
+							End:     validFipPool.Spec.IPConfig.Pool.End,
+							Exclude: validFipPool.Spec.IPConfig.Pool.Exclude,
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "invalid start IP address format: invalid-ip",
+		},
+		{
+			name: "start IP not within subnet",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   "192.168.2.10",
+							End:     validFipPool.Spec.IPConfig.Pool.End,
+							Exclude: validFipPool.Spec.IPConfig.Pool.Exclude,
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "start IP address 192.168.2.10 is not within the subnet 192.168.1.0/24",
+		},
+		{
+			name: "invalid end IP address format",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   validFipPool.Spec.IPConfig.Pool.Start,
+							End:     "invalid-ip",
+							Exclude: validFipPool.Spec.IPConfig.Pool.Exclude,
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "invalid end IP address format: invalid-ip",
+		},
+		{
+			name: "end IP not within subnet",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   validFipPool.Spec.IPConfig.Pool.Start,
+							End:     "192.168.2.20",
+							Exclude: validFipPool.Spec.IPConfig.Pool.Exclude,
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "end IP address 192.168.2.20 is not within the subnet 192.168.1.0/24",
+		},
+		{
+			name: "start IP greater than end IP",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   "192.168.1.20",
+							End:     "192.168.1.10",
+							Exclude: validFipPool.Spec.IPConfig.Pool.Exclude,
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "start IP address 192.168.1.20 must be less than or equal to end IP address 192.168.1.10",
+		},
+		{
+			name: "invalid excluded IP address format",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   validFipPool.Spec.IPConfig.Pool.Start,
+							End:     validFipPool.Spec.IPConfig.Pool.End,
+							Exclude: []string{"invalid-ip"},
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "invalid excluded IP address format: invalid-ip",
+		},
+		{
+			name: "excluded IP not within subnet",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   validFipPool.Spec.IPConfig.Pool.Start,
+							End:     validFipPool.Spec.IPConfig.Pool.End,
+							Exclude: []string{"192.168.2.15"},
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "excluded IP address 192.168.2.15 is not within the subnet 192.168.1.0/24",
+		},
+		{
+			name: "excluded IP before pool start",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   "192.168.1.10",
+							End:     "192.168.1.20",
+							Exclude: []string{"192.168.1.5"},
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "excluded IP address 192.168.1.5 is not within the pool range [192.168.1.10, 192.168.1.20]",
+		},
+		{
+			name: "excluded IP after pool end",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   "192.168.1.10",
+							End:     "192.168.1.20",
+							Exclude: []string{"192.168.1.25"},
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "excluded IP address 192.168.1.25 is not within the pool range [192.168.1.10, 192.168.1.20]",
+		},
+		{
+			name:            "valid request",
+			fipPool:         validFipPool,
+			expectedAllowed: true,
+		},
+		{
+			name: "valid request with multiple excluded IPs",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   "192.168.1.10",
+							End:     "192.168.1.20",
+							Exclude: []string{"192.168.1.15", "192.168.1.18"},
+						},
+					},
+				},
+			},
+			expectedAllowed: true,
+		},
+		{
+			name: "valid request with no excluded IPs",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   "192.168.1.10",
+							End:     "192.168.1.20",
+							Exclude: []string{},
+						},
+					},
+				},
+			},
+			expectedAllowed: true,
+		},
+		{
+			name: "valid request with start equal to end",
+			fipPool: &rfmv1.FloatingIPPool{
+				TypeMeta:   validFipPool.TypeMeta,
+				ObjectMeta: validFipPool.ObjectMeta,
+				Spec: rfmv1.FloatingIPPoolSpec{
+					IPConfig: &rfmv1.IPConfig{
+						Subnet: "192.168.1.0/24",
+						Pool: rfmv1.Pool{
+							Start:   "192.168.1.15",
+							End:     "192.168.1.15",
+							Exclude: []string{},
+						},
+					},
+				},
+			},
+			expectedAllowed: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ar := &admissionv1.AdmissionReview{
+				Request: &admissionv1.AdmissionRequest{
+					UID: "test-uid",
+				},
+			}
+
+			response := validateFloatingIPPool(context.Background(), ar, tc.fipPool)
+
+			assert.Equal(t, tc.expectedAllowed, response.Allowed)
+			if !tc.expectedAllowed {
+				assert.Equal(t, tc.expectedMessage, response.Result.Message)
+			}
+		})
+	}
+}
+
+func getUnstructuredList(objects []runtime.Object) ([]runtime.Object, error) {
 	unstructuredList := []runtime.Object{}
 	for _, obj := range objects {
 		unstructuredMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
