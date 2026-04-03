@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	rfmv1 "github.com/joeyloman/rancher-fip-manager/pkg/apis/rancher.k8s.binbash.org/v1beta1"
+	rfmv2 "github.com/joeyloman/rancher-fip-manager/pkg/apis/rancher.k8s.binbash.org/v1beta2"
 	"github.com/stretchr/testify/assert"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -15,53 +15,53 @@ import (
 
 func TestValidateFloatingIP(t *testing.T) {
 	ipAddr := "192.168.1.100"
-	fipPool := &rfmv1.FloatingIPPool{
+	fipPool := &rfmv2.FloatingIPPool{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rancher.k8s.binbash.org/v1beta1",
+			APIVersion: "rancher.k8s.binbash.org/v1beta2",
 			Kind:       "FloatingIPPool",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-pool",
 		},
-		Spec: rfmv1.FloatingIPPoolSpec{
-			IPConfig: &rfmv1.IPConfig{
+		Spec: rfmv2.FloatingIPPoolSpec{
+			IPConfig: &rfmv2.IPConfig{
 				Subnet: "192.168.1.0/24",
-				Pool: rfmv1.Pool{
+				Pool: rfmv2.Pool{
 					Start:   "192.168.1.10",
 					End:     "192.168.1.200",
 					Exclude: []string{"192.168.1.101"},
 				},
 			},
 		},
-		Status: rfmv1.FloatingIPPoolStatus{
+		Status: rfmv2.FloatingIPPoolStatus{
 			Allocated: map[string]string{
 				"192.168.1.102": "default/another-fip",
 			},
 			Available: 1,
 		},
 	}
-	plbc := &rfmv1.FloatingIPProjectQuota{
+	plbc := &rfmv2.FloatingIPProjectQuota{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rancher.k8s.binbash.org/v1beta1",
+			APIVersion: "rancher.k8s.binbash.org/v1beta2",
 			Kind:       "FloatingIPProjectQuota",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-project",
 		},
-		Spec: rfmv1.FloatingIPProjectQuotaSpec{
+		Spec: rfmv2.FloatingIPProjectQuotaSpec{
 			FloatingIPQuota: map[string]int{
 				"test-pool": 1,
 			},
 		},
-		Status: rfmv1.FloatingIPProjectQuotaStatus{
-			FloatingIPs: map[string]*rfmv1.FipInfo{
+		Status: rfmv2.FloatingIPProjectQuotaStatus{
+			FloatingIPs: map[string]*rfmv2.FipInfo{
 				"test-pool": {
 					Used: 0,
 				},
 			},
 		},
 	}
-	fip := &rfmv1.FloatingIP{
+	fip := &rfmv2.FloatingIP{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-fip",
 			Namespace: "default",
@@ -69,16 +69,17 @@ func TestValidateFloatingIP(t *testing.T) {
 				"rancher.k8s.binbash.org/project-name": "test-project",
 			},
 		},
-		Spec: rfmv1.FloatingIPSpec{
+		Spec: rfmv2.FloatingIPSpec{
 			FloatingIPPool: "test-pool",
 		},
 	}
 
 	testCases := []struct {
 		name            string
-		fip             *rfmv1.FloatingIP
+		fip             *rfmv2.FloatingIP
 		existingPools   []runtime.Object
 		existingPLBCs   []runtime.Object
+		existingFIPs    []runtime.Object
 		expectedAllowed bool
 		expectedMessage string
 	}{
@@ -92,9 +93,9 @@ func TestValidateFloatingIP(t *testing.T) {
 		},
 		{
 			name: "invalid ip address",
-			fip: &rfmv1.FloatingIP{
+			fip: &rfmv2.FloatingIP{
 				ObjectMeta: fip.ObjectMeta,
-				Spec: rfmv1.FloatingIPSpec{
+				Spec: rfmv2.FloatingIPSpec{
 					FloatingIPPool: "test-pool",
 					IPAddr:         new(string), // empty string will be invalid
 				},
@@ -106,9 +107,9 @@ func TestValidateFloatingIP(t *testing.T) {
 		},
 		{
 			name: "ip not in subnet",
-			fip: &rfmv1.FloatingIP{
+			fip: &rfmv2.FloatingIP{
 				ObjectMeta: fip.ObjectMeta,
-				Spec: rfmv1.FloatingIPSpec{
+				Spec: rfmv2.FloatingIPSpec{
 					FloatingIPPool: "test-pool",
 					IPAddr:         func() *string { s := "192.168.2.1"; return &s }(),
 				},
@@ -120,9 +121,9 @@ func TestValidateFloatingIP(t *testing.T) {
 		},
 		{
 			name: "ip in exclude list",
-			fip: &rfmv1.FloatingIP{
+			fip: &rfmv2.FloatingIP{
 				ObjectMeta: fip.ObjectMeta,
-				Spec: rfmv1.FloatingIPSpec{
+				Spec: rfmv2.FloatingIPSpec{
 					FloatingIPPool: "test-pool",
 					IPAddr:         func() *string { s := "192.168.1.101"; return &s }(),
 				},
@@ -134,9 +135,9 @@ func TestValidateFloatingIP(t *testing.T) {
 		},
 		{
 			name: "ip already allocated",
-			fip: &rfmv1.FloatingIP{
+			fip: &rfmv2.FloatingIP{
 				ObjectMeta: fip.ObjectMeta,
-				Spec: rfmv1.FloatingIPSpec{
+				Spec: rfmv2.FloatingIPSpec{
 					FloatingIPPool: "test-pool",
 					IPAddr:         func() *string { s := "192.168.1.102"; return &s }(),
 				},
@@ -148,18 +149,18 @@ func TestValidateFloatingIP(t *testing.T) {
 		},
 		{
 			name: "pool is full",
-			fip: &rfmv1.FloatingIP{
+			fip: &rfmv2.FloatingIP{
 				ObjectMeta: fip.ObjectMeta,
-				Spec: rfmv1.FloatingIPSpec{
+				Spec: rfmv2.FloatingIPSpec{
 					FloatingIPPool: "test-pool",
 				},
 			},
 			existingPools: []runtime.Object{
-				&rfmv1.FloatingIPPool{
+				&rfmv2.FloatingIPPool{
 					TypeMeta:   fipPool.TypeMeta,
 					ObjectMeta: fipPool.ObjectMeta,
 					Spec:       fipPool.Spec,
-					Status: rfmv1.FloatingIPPoolStatus{
+					Status: rfmv2.FloatingIPPoolStatus{
 						Available: 0,
 					},
 				},
@@ -173,10 +174,10 @@ func TestValidateFloatingIP(t *testing.T) {
 			fip:           fip,
 			existingPools: []runtime.Object{fipPool},
 			existingPLBCs: []runtime.Object{
-				&rfmv1.FloatingIPProjectQuota{
+				&rfmv2.FloatingIPProjectQuota{
 					TypeMeta:   plbc.TypeMeta,
 					ObjectMeta: plbc.ObjectMeta,
-					Spec:       rfmv1.FloatingIPProjectQuotaSpec{}, // no quota
+					Spec:       rfmv2.FloatingIPProjectQuotaSpec{}, // no quota
 				},
 			},
 			expectedAllowed: false,
@@ -187,12 +188,12 @@ func TestValidateFloatingIP(t *testing.T) {
 			fip:           fip,
 			existingPools: []runtime.Object{fipPool},
 			existingPLBCs: []runtime.Object{
-				&rfmv1.FloatingIPProjectQuota{
+				&rfmv2.FloatingIPProjectQuota{
 					TypeMeta:   plbc.TypeMeta,
 					ObjectMeta: plbc.ObjectMeta,
 					Spec:       plbc.Spec,
-					Status: rfmv1.FloatingIPProjectQuotaStatus{
-						FloatingIPs: map[string]*rfmv1.FipInfo{
+					Status: rfmv2.FloatingIPProjectQuotaStatus{
+						FloatingIPs: map[string]*rfmv2.FipInfo{
 							"test-pool": {
 								Used: 1, // quota is 1
 							},
@@ -205,9 +206,9 @@ func TestValidateFloatingIP(t *testing.T) {
 		},
 		{
 			name: "valid request",
-			fip: &rfmv1.FloatingIP{
+			fip: &rfmv2.FloatingIP{
 				ObjectMeta: fip.ObjectMeta,
-				Spec: rfmv1.FloatingIPSpec{
+				Spec: rfmv2.FloatingIPSpec{
 					FloatingIPPool: "test-pool",
 					IPAddr:         &ipAddr,
 				},
@@ -215,6 +216,438 @@ func TestValidateFloatingIP(t *testing.T) {
 			existingPools:   []runtime.Object{fipPool},
 			existingPLBCs:   []runtime.Object{plbc},
 			expectedAllowed: true,
+		},
+		// Test cases for FloatingIPGroup checks (section 4)
+		{
+			name: "floatingip-group label not set - should allow",
+			fip: &rfmv2.FloatingIP{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "rancher.k8s.binbash.org/v1beta2",
+					Kind:       "FloatingIP",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-fip-new",
+					Namespace: "default",
+					Labels: map[string]string{
+						"rancher.k8s.binbash.org/project-name": "test-project",
+					},
+				},
+				Spec: rfmv2.FloatingIPSpec{
+					FloatingIPPool: "test-pool",
+					IPAddr:         func() *string { s := "192.168.1.50"; return &s }(),
+				},
+			},
+			existingPools: []runtime.Object{fipPool},
+			existingPLBCs: []runtime.Object{plbc},
+			existingFIPs: []runtime.Object{
+				&rfmv2.FloatingIP{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "rancher.k8s.binbash.org/v1beta2",
+						Kind:       "FloatingIP",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-fip",
+						Namespace: "default",
+						Labels: map[string]string{
+							"rancher.k8s.binbash.org/project-name":     "test-project",
+							"rancher.k8s.binbash.org/floatingip-group": "my-group",
+						},
+					},
+					Spec: rfmv2.FloatingIPSpec{
+						FloatingIPPool: "test-pool",
+						IPAddr:         func() *string { s := "192.168.1.51"; return &s }(),
+					},
+					Status: rfmv2.FloatingIPStatus{
+						IPAddr: "192.168.1.51",
+						Assigned: &rfmv2.AssignedInfo{
+							ProjectName:     "test-project",
+							FloatingIPGroup: "my-group",
+						},
+					},
+				},
+			},
+			expectedAllowed: true,
+		},
+		{
+			name: "ip address not specified - should skip group check",
+			fip: &rfmv2.FloatingIP{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "rancher.k8s.binbash.org/v1beta2",
+					Kind:       "FloatingIP",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-fip-new",
+					Namespace: "default",
+					Labels: map[string]string{
+						"rancher.k8s.binbash.org/project-name":     "test-project",
+						"rancher.k8s.binbash.org/floatingip-group": "my-group",
+					},
+				},
+				Spec: rfmv2.FloatingIPSpec{
+					FloatingIPPool: "test-pool",
+					IPAddr:         nil,
+				},
+			},
+			existingPools: []runtime.Object{fipPool},
+			existingPLBCs: []runtime.Object{plbc},
+			existingFIPs: []runtime.Object{
+				&rfmv2.FloatingIP{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "rancher.k8s.binbash.org/v1beta2",
+						Kind:       "FloatingIP",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-fip",
+						Namespace: "default",
+						Labels: map[string]string{
+							"rancher.k8s.binbash.org/project-name":     "test-project",
+							"rancher.k8s.binbash.org/floatingip-group": "my-group",
+						},
+					},
+					Spec: rfmv2.FloatingIPSpec{
+						FloatingIPPool: "test-pool",
+						IPAddr:         func() *string { s := "192.168.1.51"; return &s }(),
+					},
+					Status: rfmv2.FloatingIPStatus{
+						IPAddr: "192.168.1.51",
+						Assigned: &rfmv2.AssignedInfo{
+							ProjectName:     "test-project",
+							FloatingIPGroup: "my-group",
+						},
+					},
+				},
+			},
+			expectedAllowed: true,
+		},
+		{
+			name: "same IP with same floatingip-group - should allow (same FIP)",
+			fip: &rfmv2.FloatingIP{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "rancher.k8s.binbash.org/v1beta2",
+					Kind:       "FloatingIP",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "existing-fip",
+					Namespace: "default",
+					Labels: map[string]string{
+						"rancher.k8s.binbash.org/project-name":     "test-project",
+						"rancher.k8s.binbash.org/floatingip-group": "my-group",
+					},
+				},
+				Spec: rfmv2.FloatingIPSpec{
+					FloatingIPPool: "test-pool",
+					IPAddr:         func() *string { s := "192.168.1.51"; return &s }(),
+				},
+			},
+			existingPools: []runtime.Object{fipPool},
+			existingPLBCs: []runtime.Object{plbc},
+			existingFIPs: []runtime.Object{
+				&rfmv2.FloatingIP{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "rancher.k8s.binbash.org/v1beta2",
+						Kind:       "FloatingIP",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-fip",
+						Namespace: "default",
+						Labels: map[string]string{
+							"rancher.k8s.binbash.org/project-name":     "test-project",
+							"rancher.k8s.binbash.org/floatingip-group": "my-group",
+						},
+					},
+					Spec: rfmv2.FloatingIPSpec{
+						FloatingIPPool: "test-pool",
+						IPAddr:         func() *string { s := "192.168.1.51"; return &s }(),
+					},
+					Status: rfmv2.FloatingIPStatus{
+						IPAddr: "192.168.1.51",
+						Assigned: &rfmv2.AssignedInfo{
+							ProjectName:     "test-project",
+							FloatingIPGroup: "my-group",
+						},
+					},
+				},
+			},
+			expectedAllowed: true,
+		},
+		{
+			name: "same IP with different floatingip-group - should allow",
+			fip: &rfmv2.FloatingIP{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "rancher.k8s.binbash.org/v1beta2",
+					Kind:       "FloatingIP",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-fip-new",
+					Namespace: "default",
+					Labels: map[string]string{
+						"rancher.k8s.binbash.org/project-name":     "test-project",
+						"rancher.k8s.binbash.org/floatingip-group": "different-group",
+					},
+				},
+				Spec: rfmv2.FloatingIPSpec{
+					FloatingIPPool: "test-pool",
+					IPAddr:         func() *string { s := "192.168.1.51"; return &s }(),
+				},
+			},
+			existingPools: []runtime.Object{fipPool},
+			existingPLBCs: []runtime.Object{plbc},
+			existingFIPs: []runtime.Object{
+				&rfmv2.FloatingIP{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "rancher.k8s.binbash.org/v1beta2",
+						Kind:       "FloatingIP",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-fip",
+						Namespace: "default",
+						Labels: map[string]string{
+							"rancher.k8s.binbash.org/project-name":     "test-project",
+							"rancher.k8s.binbash.org/floatingip-group": "my-group",
+						},
+					},
+					Spec: rfmv2.FloatingIPSpec{
+						FloatingIPPool: "test-pool",
+						IPAddr:         func() *string { s := "192.168.1.51"; return &s }(),
+					},
+					Status: rfmv2.FloatingIPStatus{
+						IPAddr: "192.168.1.51",
+						Assigned: &rfmv2.AssignedInfo{
+							ProjectName:     "test-project",
+							FloatingIPGroup: "my-group",
+						},
+					},
+				},
+			},
+			expectedAllowed: true,
+		},
+		{
+			name: "different IP with same floatingip-group in same project - should reject",
+			fip: &rfmv2.FloatingIP{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "rancher.k8s.binbash.org/v1beta2",
+					Kind:       "FloatingIP",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-fip-new",
+					Namespace: "default",
+					Labels: map[string]string{
+						"rancher.k8s.binbash.org/project-name":     "test-project",
+						"rancher.k8s.binbash.org/floatingip-group": "my-group",
+					},
+				},
+				Spec: rfmv2.FloatingIPSpec{
+					FloatingIPPool: "test-pool",
+					IPAddr:         func() *string { s := "192.168.1.60"; return &s }(),
+				},
+			},
+			existingPools: []runtime.Object{fipPool},
+			existingPLBCs: []runtime.Object{plbc},
+			existingFIPs: []runtime.Object{
+				&rfmv2.FloatingIP{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "rancher.k8s.binbash.org/v1beta2",
+						Kind:       "FloatingIP",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-fip",
+						Namespace: "default",
+						Labels: map[string]string{
+							"rancher.k8s.binbash.org/project-name":     "test-project",
+							"rancher.k8s.binbash.org/floatingip-group": "my-group",
+						},
+					},
+					Spec: rfmv2.FloatingIPSpec{
+						FloatingIPPool: "test-pool",
+						IPAddr:         func() *string { s := "192.168.1.51"; return &s }(),
+					},
+					Status: rfmv2.FloatingIPStatus{
+						IPAddr: "192.168.1.51",
+						Assigned: &rfmv2.AssignedInfo{
+							ProjectName:     "test-project",
+							FloatingIPGroup: "my-group",
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "FloatingIP groupname my-group is already used within project test-project in a different FloatingIP object default/existing-fip",
+		},
+		{
+			name: "different IP with same floatingip-group in different project - should allow",
+			fip: &rfmv2.FloatingIP{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "rancher.k8s.binbash.org/v1beta2",
+					Kind:       "FloatingIP",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-fip-new",
+					Namespace: "default",
+					Labels: map[string]string{
+						"rancher.k8s.binbash.org/project-name":     "test-project",
+						"rancher.k8s.binbash.org/floatingip-group": "my-group",
+					},
+				},
+				Spec: rfmv2.FloatingIPSpec{
+					FloatingIPPool: "test-pool",
+					IPAddr:         func() *string { s := "192.168.1.60"; return &s }(),
+				},
+			},
+			existingPools: []runtime.Object{fipPool},
+			existingPLBCs: []runtime.Object{plbc},
+			existingFIPs: []runtime.Object{
+				&rfmv2.FloatingIP{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "rancher.k8s.binbash.org/v1beta2",
+						Kind:       "FloatingIP",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-fip",
+						Namespace: "default",
+						Labels: map[string]string{
+							"rancher.k8s.binbash.org/project-name":     "other-project",
+							"rancher.k8s.binbash.org/floatingip-group": "my-group",
+						},
+					},
+					Spec: rfmv2.FloatingIPSpec{
+						FloatingIPPool: "test-pool",
+						IPAddr:         func() *string { s := "192.168.1.51"; return &s }(),
+					},
+					Status: rfmv2.FloatingIPStatus{
+						IPAddr: "192.168.1.51",
+						Assigned: &rfmv2.AssignedInfo{
+							ProjectName:     "other-project",
+							FloatingIPGroup: "my-group",
+						},
+					},
+				},
+			},
+			expectedAllowed: true,
+		},
+		{
+			name: "existing FIP without assigned status - should allow",
+			fip: &rfmv2.FloatingIP{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "rancher.k8s.binbash.org/v1beta2",
+					Kind:       "FloatingIP",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-fip-new",
+					Namespace: "default",
+					Labels: map[string]string{
+						"rancher.k8s.binbash.org/project-name":     "test-project",
+						"rancher.k8s.binbash.org/floatingip-group": "my-group",
+					},
+				},
+				Spec: rfmv2.FloatingIPSpec{
+					FloatingIPPool: "test-pool",
+					IPAddr:         func() *string { s := "192.168.1.60"; return &s }(),
+				},
+			},
+			existingPools: []runtime.Object{fipPool},
+			existingPLBCs: []runtime.Object{plbc},
+			existingFIPs: []runtime.Object{
+				&rfmv2.FloatingIP{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "rancher.k8s.binbash.org/v1beta2",
+						Kind:       "FloatingIP",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-fip",
+						Namespace: "default",
+						Labels: map[string]string{
+							"rancher.k8s.binbash.org/project-name":     "test-project",
+							"rancher.k8s.binbash.org/floatingip-group": "my-group",
+						},
+					},
+					Spec: rfmv2.FloatingIPSpec{
+						FloatingIPPool: "test-pool",
+						IPAddr:         func() *string { s := "192.168.1.51"; return &s }(),
+					},
+					Status: rfmv2.FloatingIPStatus{
+						IPAddr:   "192.168.1.51",
+						Assigned: nil,
+					},
+				},
+			},
+			expectedAllowed: true,
+		},
+		{
+			name: "multiple existing FIPs with same group in project - should reject",
+			fip: &rfmv2.FloatingIP{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "rancher.k8s.binbash.org/v1beta2",
+					Kind:       "FloatingIP",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-fip-new",
+					Namespace: "default",
+					Labels: map[string]string{
+						"rancher.k8s.binbash.org/project-name":     "test-project",
+						"rancher.k8s.binbash.org/floatingip-group": "my-group",
+					},
+				},
+				Spec: rfmv2.FloatingIPSpec{
+					FloatingIPPool: "test-pool",
+					IPAddr:         func() *string { s := "192.168.1.70"; return &s }(),
+				},
+			},
+			existingPools: []runtime.Object{fipPool},
+			existingPLBCs: []runtime.Object{plbc},
+			existingFIPs: []runtime.Object{
+				&rfmv2.FloatingIP{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "rancher.k8s.binbash.org/v1beta2",
+						Kind:       "FloatingIP",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-fip-1",
+						Namespace: "default",
+						Labels: map[string]string{
+							"rancher.k8s.binbash.org/project-name":     "test-project",
+							"rancher.k8s.binbash.org/floatingip-group": "my-group",
+						},
+					},
+					Spec: rfmv2.FloatingIPSpec{
+						FloatingIPPool: "test-pool",
+						IPAddr:         func() *string { s := "192.168.1.51"; return &s }(),
+					},
+					Status: rfmv2.FloatingIPStatus{
+						IPAddr: "192.168.1.51",
+						Assigned: &rfmv2.AssignedInfo{
+							ProjectName:     "test-project",
+							FloatingIPGroup: "my-group",
+						},
+					},
+				},
+				&rfmv2.FloatingIP{
+					TypeMeta: metav1.TypeMeta{
+						APIVersion: "rancher.k8s.binbash.org/v1beta2",
+						Kind:       "FloatingIP",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-fip-2",
+						Namespace: "default",
+						Labels: map[string]string{
+							"rancher.k8s.binbash.org/project-name":     "test-project",
+							"rancher.k8s.binbash.org/floatingip-group": "my-group",
+						},
+					},
+					Spec: rfmv2.FloatingIPSpec{
+						FloatingIPPool: "test-pool",
+						IPAddr:         func() *string { s := "192.168.1.52"; return &s }(),
+					},
+					Status: rfmv2.FloatingIPStatus{
+						IPAddr: "192.168.1.52",
+						Assigned: &rfmv2.AssignedInfo{
+							ProjectName:     "test-project",
+							FloatingIPGroup: "my-group",
+						},
+					},
+				},
+			},
+			expectedAllowed: false,
+			expectedMessage: "FloatingIP groupname my-group is already used within project test-project in a different FloatingIP object default/existing-fip-1",
 		},
 	}
 
@@ -227,10 +660,13 @@ func TestValidateFloatingIP(t *testing.T) {
 			}
 			unstructuredPools, _ := getUnstructuredList(tc.existingPools)
 			unstructuredPLBCs, _ := getUnstructuredList(tc.existingPLBCs)
+			unstructuredFIPs, _ := getUnstructuredList(tc.existingFIPs)
 
-			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme(), append(unstructuredPools, unstructuredPLBCs...)...)
+			allObjects := append(unstructuredPools, unstructuredPLBCs...)
+			allObjects = append(allObjects, unstructuredFIPs...)
+			dynamicClient := fake.NewSimpleDynamicClient(runtime.NewScheme(), allObjects...)
 
-			response := validateFloatingIP(context.Background(), dynamicClient, ar, tc.fip, nil)
+			response := validateFloatingIP(context.Background(), dynamicClient, ar, tc.fip, nil, nil)
 
 			assert.Equal(t, tc.expectedAllowed, response.Allowed)
 			if !tc.expectedAllowed {
@@ -241,18 +677,18 @@ func TestValidateFloatingIP(t *testing.T) {
 }
 
 func TestValidateFloatingIPPool(t *testing.T) {
-	validFipPool := &rfmv1.FloatingIPPool{
+	validFipPool := &rfmv2.FloatingIPPool{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rancher.k8s.binbash.org/v1beta1",
+			APIVersion: "rancher.k8s.binbash.org/v1beta2",
 			Kind:       "FloatingIPPool",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-pool",
 		},
-		Spec: rfmv1.FloatingIPPoolSpec{
-			IPConfig: &rfmv1.IPConfig{
+		Spec: rfmv2.FloatingIPPoolSpec{
+			IPConfig: &rfmv2.IPConfig{
 				Subnet: "192.168.1.0/24",
-				Pool: rfmv1.Pool{
+				Pool: rfmv2.Pool{
 					Start:   "192.168.1.10",
 					End:     "192.168.1.20",
 					Exclude: []string{"192.168.1.15"},
@@ -263,17 +699,17 @@ func TestValidateFloatingIPPool(t *testing.T) {
 
 	testCases := []struct {
 		name            string
-		fipPool         *rfmv1.FloatingIPPool
+		fipPool         *rfmv2.FloatingIPPool
 		expectedAllowed bool
 		expectedMessage string
 	}{
 		{
 			name: "invalid subnet format",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "invalid-subnet",
 						Pool:   validFipPool.Spec.IPConfig.Pool,
 					},
@@ -284,13 +720,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "invalid start IP address format",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   "invalid-ip",
 							End:     validFipPool.Spec.IPConfig.Pool.End,
 							Exclude: validFipPool.Spec.IPConfig.Pool.Exclude,
@@ -303,13 +739,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "start IP not within subnet",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   "192.168.2.10",
 							End:     validFipPool.Spec.IPConfig.Pool.End,
 							Exclude: validFipPool.Spec.IPConfig.Pool.Exclude,
@@ -322,13 +758,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "invalid end IP address format",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   validFipPool.Spec.IPConfig.Pool.Start,
 							End:     "invalid-ip",
 							Exclude: validFipPool.Spec.IPConfig.Pool.Exclude,
@@ -341,13 +777,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "end IP not within subnet",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   validFipPool.Spec.IPConfig.Pool.Start,
 							End:     "192.168.2.20",
 							Exclude: validFipPool.Spec.IPConfig.Pool.Exclude,
@@ -360,13 +796,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "start IP greater than end IP",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   "192.168.1.20",
 							End:     "192.168.1.10",
 							Exclude: validFipPool.Spec.IPConfig.Pool.Exclude,
@@ -379,13 +815,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "invalid excluded IP address format",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   validFipPool.Spec.IPConfig.Pool.Start,
 							End:     validFipPool.Spec.IPConfig.Pool.End,
 							Exclude: []string{"invalid-ip"},
@@ -398,13 +834,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "excluded IP not within subnet",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   validFipPool.Spec.IPConfig.Pool.Start,
 							End:     validFipPool.Spec.IPConfig.Pool.End,
 							Exclude: []string{"192.168.2.15"},
@@ -417,13 +853,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "excluded IP before pool start",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   "192.168.1.10",
 							End:     "192.168.1.20",
 							Exclude: []string{"192.168.1.5"},
@@ -436,13 +872,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "excluded IP after pool end",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   "192.168.1.10",
 							End:     "192.168.1.20",
 							Exclude: []string{"192.168.1.25"},
@@ -460,13 +896,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "valid request with multiple excluded IPs",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   "192.168.1.10",
 							End:     "192.168.1.20",
 							Exclude: []string{"192.168.1.15", "192.168.1.18"},
@@ -478,13 +914,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "valid request with no excluded IPs",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   "192.168.1.10",
 							End:     "192.168.1.20",
 							Exclude: []string{},
@@ -496,13 +932,13 @@ func TestValidateFloatingIPPool(t *testing.T) {
 		},
 		{
 			name: "valid request with start equal to end",
-			fipPool: &rfmv1.FloatingIPPool{
+			fipPool: &rfmv2.FloatingIPPool{
 				TypeMeta:   validFipPool.TypeMeta,
 				ObjectMeta: validFipPool.ObjectMeta,
-				Spec: rfmv1.FloatingIPPoolSpec{
-					IPConfig: &rfmv1.IPConfig{
+				Spec: rfmv2.FloatingIPPoolSpec{
+					IPConfig: &rfmv2.IPConfig{
 						Subnet: "192.168.1.0/24",
-						Pool: rfmv1.Pool{
+						Pool: rfmv2.Pool{
 							Start:   "192.168.1.15",
 							End:     "192.168.1.15",
 							Exclude: []string{},

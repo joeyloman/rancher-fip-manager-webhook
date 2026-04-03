@@ -10,7 +10,7 @@ import (
 	"os"
 	"time"
 
-	rfmv1 "github.com/joeyloman/rancher-fip-manager/pkg/apis/rancher.k8s.binbash.org/v1beta1"
+	rfmv2 "github.com/joeyloman/rancher-fip-manager/pkg/apis/rancher.k8s.binbash.org/v1beta2"
 	log "github.com/sirupsen/logrus"
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -48,11 +48,14 @@ func Register(ctx context.Context) *Handler {
 	}
 }
 
-func validateFloatingIP(ctx context.Context, dynamic dynamic.Interface, ar *admissionv1.AdmissionReview, fip *rfmv1.FloatingIP, h *Handler) *admissionv1.AdmissionResponse {
+func validateFloatingIP(ctx context.Context, dynamic dynamic.Interface, ar *admissionv1.AdmissionReview, fip *rfmv2.FloatingIP, oldFIP *rfmv2.FloatingIP, h *Handler) *admissionv1.AdmissionResponse {
+	// Determine if this is an UPDATE operation
+	isUpdate := oldFIP != nil
+
 	// 1. Check if the specified FloatingIPPool exists.
 	fipGVR := schema.GroupVersionResource{
 		Group:    "rancher.k8s.binbash.org",
-		Version:  "v1beta1",
+		Version:  "v1beta2",
 		Resource: "floatingippools",
 	}
 
@@ -67,7 +70,7 @@ func validateFloatingIP(ctx context.Context, dynamic dynamic.Interface, ar *admi
 		}
 	}
 
-	var fipPool rfmv1.FloatingIPPool
+	var fipPool rfmv2.FloatingIPPool
 	err = runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredFIPPool.Object, &fipPool)
 	if err != nil {
 		log.Errorf("failed to convert unstructured FloatingIPPool to typed: %s", err)
@@ -180,7 +183,11 @@ func validateFloatingIP(ctx context.Context, dynamic dynamic.Interface, ar *admi
 		}
 
 		// Check if the IP is already allocated
-		if _, ok := fipPool.Status.Allocated[*fip.Spec.IPAddr]; ok {
+		// For UPDATE operations, skip this check if the IP is the same as the old one
+		allocatedIP := *fip.Spec.IPAddr
+		if isUpdate && oldFIP != nil && oldFIP.Status.IPAddr == allocatedIP {
+			// The IP hasn't changed, skip the allocated check
+		} else if _, ok := fipPool.Status.Allocated[allocatedIP]; ok {
 			return &admissionv1.AdmissionResponse{
 				UID:     ar.Request.UID,
 				Allowed: false,
@@ -202,70 +209,149 @@ func validateFloatingIP(ctx context.Context, dynamic dynamic.Interface, ar *admi
 		}
 	}
 
-	// 3. Project Quota Enforcement
-	// This sleep prevents Quota usage race conditions when creating multiple FloatingIPs in a short period of time
-	time.Sleep(2 * time.Second)
-
-	projectID := fip.ObjectMeta.Labels["rancher.k8s.binbash.org/project-name"]
-
-	plbcGVR := schema.GroupVersionResource{
-		Group:    "rancher.k8s.binbash.org",
-		Version:  "v1beta1",
-		Resource: "floatingipprojectquotas",
-	}
-
-	unstructuredPLBC, err := dynamic.Resource(plbcGVR).Get(ctx, projectID, metav1.GetOptions{})
-	if err != nil {
-		log.Errorf("failed to get floatingipprojectquota for project %s: %s", projectID, err)
-		return &admissionv1.AdmissionResponse{
-			UID:     ar.Request.UID,
-			Allowed: false,
-			Result: &metav1.Status{
-				Message: fmt.Sprintf("failed to get floatingipprojectquota for project %s", projectID),
-			},
+	// Skip quota check if the IP address hasn't changed during an update
+	// For auto-assignment (IPAddr is nil), we still need to check quota
+	shouldCheckQuota := true
+	if isUpdate && oldFIP != nil && fip.Spec.IPAddr != nil {
+		allocatedIP := *fip.Spec.IPAddr
+		if oldFIP.Status.IPAddr == allocatedIP {
+			shouldCheckQuota = false
 		}
 	}
 
-	var plbc rfmv1.FloatingIPProjectQuota
-	err = runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPLBC.Object, &plbc)
-	if err != nil {
-		log.Errorf("failed to convert unstructured FloatingIPProjectQuota to typed: %s", err)
-		return &admissionv1.AdmissionResponse{
-			UID:     ar.Request.UID,
-			Allowed: false,
-			Result: &metav1.Status{
-				Message: "internal server error: failed to process floatingipprojectquota",
-			},
+	if shouldCheckQuota {
+		// 3. Project Quota Enforcement
+
+		// This sleep prevents Quota usage race conditions when creating multiple FloatingIPs in a short period of time
+		time.Sleep(2 * time.Second)
+
+		projectID := fip.ObjectMeta.Labels["rancher.k8s.binbash.org/project-name"]
+
+		plbcGVR := schema.GroupVersionResource{
+			Group:    "rancher.k8s.binbash.org",
+			Version:  "v1beta2",
+			Resource: "floatingipprojectquotas",
+		}
+
+		unstructuredPLBC, err := dynamic.Resource(plbcGVR).Get(ctx, projectID, metav1.GetOptions{})
+		if err != nil {
+			log.Errorf("failed to get floatingipprojectquota for project %s: %s", projectID, err)
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("failed to get floatingipprojectquota for project %s", projectID),
+				},
+			}
+		}
+
+		var plbc rfmv2.FloatingIPProjectQuota
+		err = runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredPLBC.Object, &plbc)
+		if err != nil {
+			log.Errorf("failed to convert unstructured FloatingIPProjectQuota to typed: %s", err)
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: "internal server error: failed to process floatingipprojectquota",
+				},
+			}
+		}
+
+		// Check the quota for the specified FloatingIPPool
+		quota, ok := plbc.Spec.FloatingIPQuota[fip.Spec.FloatingIPPool]
+		if !ok {
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("no quota defined for floatingippool %s in project %s", fip.Spec.FloatingIPPool, projectID),
+				},
+			}
+		}
+
+		// Check the current usage for that pool
+		usage := 0
+		if fipInfo, ok := plbc.Status.FloatingIPs[fip.Spec.FloatingIPPool]; ok {
+			usage = fipInfo.Used
+		}
+
+		if usage >= quota {
+			return &admissionv1.AdmissionResponse{
+				UID:     ar.Request.UID,
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: fmt.Sprintf("quota exceeded for floatingippool %s in project %s. Quota: %d, Used: %d", fip.Spec.FloatingIPPool, projectID, quota, usage),
+				},
+			}
 		}
 	}
 
-	// Check the quota for the specified FloatingIPPool
-	quota, ok := plbc.Spec.FloatingIPQuota[fip.Spec.FloatingIPPool]
-	if !ok {
-		return &admissionv1.AdmissionResponse{
-			UID:     ar.Request.UID,
-			Allowed: false,
-			Result: &metav1.Status{
-				Message: fmt.Sprintf("no quota defined for floatingippool %s in project %s", fip.Spec.FloatingIPPool, projectID),
-			},
-		}
-	}
+	// 4. FloatingIPGroup checks for existing IPs
+	if fip.Spec.IPAddr != nil {
+		// Check if the floatingip-group label is set
+		fipGroup := fip.ObjectMeta.Labels["rancher.k8s.binbash.org/floatingip-group"]
+		if fipGroup != "" {
+			// List all FloatingIPs to check for conflicts
+			fipGVR := schema.GroupVersionResource{
+				Group:    "rancher.k8s.binbash.org",
+				Version:  "v1beta2",
+				Resource: "floatingips",
+			}
 
-	// Check the current usage for that pool
-	usage := 0
-	if fipInfo, ok := plbc.Status.FloatingIPs[fip.Spec.FloatingIPPool]; ok {
-		usage = fipInfo.Used
-	}
+			fipList, err := dynamic.Resource(fipGVR).List(ctx, metav1.ListOptions{})
+			if err != nil {
+				log.Errorf("failed to list floatingips: %s", err)
+				return &admissionv1.AdmissionResponse{
+					UID:     ar.Request.UID,
+					Allowed: false,
+					Result: &metav1.Status{
+						Message: "internal server error: failed to list floatingips",
+					},
+				}
+			}
 
-	// log.Infof("(validateFloatingIP) DEBUG usage: %d, quota: %d", usage, quota)
+			items := fipList.Items
+			for _, item := range items {
+				var existingFIP rfmv2.FloatingIP
+				err := runtime.DefaultUnstructuredConverter.FromUnstructured(item.Object, &existingFIP)
+				if err != nil {
+					log.Errorf("failed to convert unstructured FloatingIP to typed: %s", err)
+					return &admissionv1.AdmissionResponse{
+						UID:     ar.Request.UID,
+						Allowed: false,
+						Result: &metav1.Status{
+							Message: "internal server error: failed to convert unstructured floatingip to typed",
+						},
+					}
+				}
 
-	if usage >= quota {
-		return &admissionv1.AdmissionResponse{
-			UID:     ar.Request.UID,
-			Allowed: false,
-			Result: &metav1.Status{
-				Message: fmt.Sprintf("quota exceeded for floatingippool %s in project %s. Quota: %d, Used: %d", fip.Spec.FloatingIPPool, projectID, quota, usage),
-			},
+				// Skip if the existing FloatingIP have the same IP address and break the loop if the the existing FloatingIP has the same fipGroup
+				if existingFIP.Status.IPAddr == *fip.Spec.IPAddr {
+					if existingFIP.Status.Assigned != nil && existingFIP.Status.Assigned.FloatingIPGroup == fipGroup {
+						break
+					} else {
+						continue
+					}
+				}
+
+				// Check if the project-name label matches the Status.Assigned.ProjectName
+				fipProjectName := fip.ObjectMeta.Labels["rancher.k8s.binbash.org/project-name"]
+				if existingFIP.Status.Assigned != nil && existingFIP.Status.Assigned.ProjectName == fipProjectName {
+					// Check if the floatingip-group label matches the Status.Assigned.FloatingIPGroup
+					if existingFIP.Status.Assigned.FloatingIPGroup == fipGroup {
+						log.Errorf("Requested FloatingIP groupname %s is already used within project %s in FloatingIP object %s/%s",
+							fipGroup, existingFIP.Status.Assigned.ProjectName, existingFIP.Namespace, existingFIP.Name)
+						return &admissionv1.AdmissionResponse{
+							UID:     ar.Request.UID,
+							Allowed: false,
+							Result: &metav1.Status{
+								Message: fmt.Sprintf("floatingip groupname %s is already used within another project", fipGroup),
+							},
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -275,7 +361,7 @@ func validateFloatingIP(ctx context.Context, dynamic dynamic.Interface, ar *admi
 	}
 }
 
-func validateFloatingIPPool(ctx context.Context, ar *admissionv1.AdmissionReview, fipPool *rfmv1.FloatingIPPool) *admissionv1.AdmissionResponse {
+func validateFloatingIPPool(ctx context.Context, ar *admissionv1.AdmissionReview, fipPool *rfmv2.FloatingIPPool) *admissionv1.AdmissionResponse {
 	// Check if the subnet is valid
 	_, subnet, err := net.ParseCIDR(fipPool.Spec.IPConfig.Subnet)
 	if err != nil {
@@ -417,7 +503,7 @@ func (h *Handler) validateFloatingIPAdmission(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	fip := &rfmv1.FloatingIP{}
+	fip := &rfmv2.FloatingIP{}
 	if err := json.Unmarshal(ar.Request.Object.Raw, &fip); err != nil {
 		log.Errorf("cannot unmarshal json to FloatingIP: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -425,7 +511,19 @@ func (h *Handler) validateFloatingIPAdmission(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	ar.Response = validateFloatingIP(r.Context(), h.dynamic, ar, fip, h)
+	// Handle UPDATE operations by extracting the old object
+	var oldFIP *rfmv2.FloatingIP
+	if ar.Request.Operation == admissionv1.Update && ar.Request.OldObject.Raw != nil {
+		oldFIP = &rfmv2.FloatingIP{}
+		if err := json.Unmarshal(ar.Request.OldObject.Raw, oldFIP); err != nil {
+			log.Errorf("cannot unmarshal json to old FloatingIP: %s", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, "cannot unmarshal json to old FloatingIP: %s", err)
+			return
+		}
+	}
+
+	ar.Response = validateFloatingIP(r.Context(), h.dynamic, ar, fip, oldFIP, h)
 	if !ar.Response.Allowed {
 		log.Warnf("(validateFloatingIPAdmission) request not allowed: %s", ar.Response.Result.Message)
 	}
@@ -443,7 +541,7 @@ func (h *Handler) validateFloatingIPPoolAdmission(w http.ResponseWriter, r *http
 		return
 	}
 
-	fipPool := &rfmv1.FloatingIPPool{}
+	fipPool := &rfmv2.FloatingIPPool{}
 	if err := json.Unmarshal(ar.Request.Object.Raw, &fipPool); err != nil {
 		log.Errorf("cannot unmarshal json to FloatingIPPool: %s", err)
 		w.WriteHeader(http.StatusInternalServerError)

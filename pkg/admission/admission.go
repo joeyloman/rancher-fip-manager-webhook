@@ -72,8 +72,8 @@ func (h *Handler) getRancherFloatingIPWebhook() (webhook admregv1.ValidatingWebh
 
 	rule := admregv1.RuleWithOperations{}
 	rule.APIGroups = []string{"rancher.k8s.binbash.org"}
-	rule.APIVersions = []string{"v1beta1"}
-	rule.Operations = []admregv1.OperationType{"CREATE"}
+	rule.APIVersions = []string{"v1beta2", "v1beta1"}
+	rule.Operations = []admregv1.OperationType{"CREATE", "UPDATE"}
 	rule.Resources = []string{"floatingips"}
 	scope := admregv1.NamespacedScope
 	rule.Scope = &scope
@@ -117,7 +117,7 @@ func (h *Handler) getRancherFloatingIPPoolWebhook() (webhook admregv1.Validating
 
 	rule := admregv1.RuleWithOperations{}
 	rule.APIGroups = []string{"rancher.k8s.binbash.org"}
-	rule.APIVersions = []string{"v1beta1"}
+	rule.APIVersions = []string{"v1beta2", "v1beta1"}
 	rule.Operations = []admregv1.OperationType{"CREATE", "UPDATE"}
 	rule.Resources = []string{"floatingippools"}
 	scope := admregv1.ClusterScope
